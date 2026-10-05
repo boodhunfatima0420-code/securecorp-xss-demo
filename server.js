@@ -77,7 +77,6 @@ db.prepare(`INSERT INTO users
 );
 
 // Add a few friends so the feed and stories look alive
-// Names reflect the diverse communities of Mauritius
 const friends = [
     { username: 'Priya Ramgoolam',     display_name: 'Priya Ramgoolam',     avatar: 'https://i.pravatar.cc/150?img=45', bio: 'Sun, sand & samosas 🏖 | Port Louis girl' },
     { username: 'Yannick Léopold',     display_name: 'Yannick Léopold',     avatar: 'https://i.pravatar.cc/150?img=15', bio: 'Sega dancer 💃 | Beach bum 🏝' },
@@ -449,6 +448,17 @@ const CSS = `
   }
   .comment-form button:hover { background: #0077cc; }
 
+  .guest-notice {
+    background: linear-gradient(45deg, rgba(240,148,51,0.12), rgba(220,39,67,0.12));
+    border: 1px solid rgba(220,39,67,0.25);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .guest-notice a { font-weight: 600; }
+
   .stories {
     background: var(--card);
     border: 1px solid var(--border);
@@ -685,8 +695,6 @@ const CSS = `
     line-height: 1;
   }
 
-  /* === Responsive breakpoints === */
-
   @media (min-width: 1200px) {
     .container { width: 75%; }
   }
@@ -730,6 +738,8 @@ const CSS = `
     .comment-form { padding: 8px 12px; gap: 6px; }
     .comment-form input[type=text] { padding: 8px 12px; font-size: 13px; }
     .comment-form button { padding: 8px 14px; font-size: 13px; }
+
+    .guest-notice { padding: 12px 14px; font-size: 13px; margin-bottom: 12px; }
 
     .stories { padding: 12px 8px; gap: 10px; margin-bottom: 12px; }
     .story-circle { width: 72px; }
@@ -780,9 +790,14 @@ app.get('/', (req, res) => {
 });
 
 // Feed page with stories, composer, and posts
+// Public route — visitors can browse without logging in
 app.get('/feed', (req, res) => {
-    const user = getAuthenticatedUser(req);
-    if (!user) return res.redirect('/login');
+    const user = getAuthenticatedUser(req) || {
+        username: 'Guest',
+        display_name: 'Guest',
+        avatar: 'https://i.pravatar.cc/150?img=13',
+        bio: ''
+    };
 
     const posts = db.prepare("SELECT * FROM posts ORDER BY created_at DESC").all();
 
@@ -813,10 +828,18 @@ app.get('/feed', (req, res) => {
 });
 
 function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStories) {
+    const isGuest = user.username === 'Guest';
+
     const displayName = escapeHtml(user.display_name || user.username);
     const avatarUrl = user.avatar;
     const toggleClass = isMitigated ? 'safe' : 'danger';
     const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
+
+    // Navbar links change depending on whether the visitor is logged in
+    const linksHtml = isGuest
+        ? `<a href="/login">Log in</a>`
+        : `<a href="/account">Profile</a>
+           <a href="/logout">Logout</a>`;
 
     const yourStoryImage = ownStory ? ownStory.image : user.avatar;
     const yourStoryHtml = `
@@ -864,7 +887,7 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
             </div>`;
         }).join('');
 
-        const postAvatar = (p.username === user.username)
+        const postAvatar = (!isGuest && p.username === user.username)
             ? user.avatar
             : 'https://i.pravatar.cc/150?u=' + encodeURIComponent(p.username);
 
@@ -896,6 +919,23 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
         </div>`;
     }).join('');
 
+    const composerHtml = isGuest ? `
+        <div class="guest-notice">
+            You are browsing as a guest. <a href="/login">Log in</a> to publish posts.
+        </div>
+    ` : `
+        <form class="composer" action="/post" method="POST">
+            <div class="composer-header">
+                <img src="${avatarUrl}" class="avatar sm" alt="">
+                <b>${displayName}</b>
+            </div>
+            <input type="text" name="caption" placeholder="What's on your mind, ${displayName}?" required autocomplete="off">
+            <div class="composer-footer">
+                <button type="submit">Post</button>
+            </div>
+        </form>
+    `;
+
     res.send(`
     <!DOCTYPE html>
     <html>
@@ -912,8 +952,7 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
         <div class="navbar">
             <div class="logo">Socially</div>
             <div class="links">
-                <a href="/account">Profile</a>
-                <a href="/logout">Logout</a>
+                ${linksHtml}
                 <button id="theme-toggle" class="icon-btn" type="button">🌙</button>
                 <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
             </div>
@@ -924,16 +963,7 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
                 ${friendStoriesHtml || ''}
             </div>
 
-            <form class="composer" action="/post" method="POST">
-                <div class="composer-header">
-                    <img src="${avatarUrl}" class="avatar sm" alt="">
-                    <b>${displayName}</b>
-                </div>
-                <input type="text" name="caption" placeholder="What's on your mind, ${displayName}?" required autocomplete="off">
-                <div class="composer-footer">
-                    <button type="submit">Post</button>
-                </div>
-            </form>
+            ${composerHtml}
 
             ${postsHtml || '<div class="card" style="padding:24px; text-align:center; color:var(--muted);">No posts yet.</div>'}
         </div>
@@ -976,7 +1006,7 @@ app.get('/login', (req, res) => {
                     <button type="submit">Log in</button>
                 </form>
                 <div class="divider">OR</div>
-                <div style="font-size:13px;color:#8e8e8e;">Forgot password? · Sign up</div>
+                <div style="font-size:13px;color:#8e8e8e;"><a href="/feed">Continue as guest →</a></div>
             </div>
         </div>
     </body>
@@ -1082,11 +1112,11 @@ app.get('/logout', (req, res) => {
 // Flip between vulnerable and secure mode
 app.get('/toggle-mitigation', (req, res) => {
     isMitigated = !isMitigated;
-    const back = req.get('referer') || '/account';
+    const back = req.get('referer') || '/feed';
     res.redirect(back);
 });
 
-// Create a new post — the caption is all we need, image is auto-generated
+// Create a new post — only logged-in users can publish
 app.post('/post', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
@@ -1104,6 +1134,7 @@ app.post('/post', (req, res) => {
 });
 
 // Storing a comment — this is where the XSS payload gets saved
+// Anyone (including guests) can post a comment. That is what makes the attack possible.
 app.post('/comment', (req, res) => {
     const { post_id, comment } = req.body;
     const user = getAuthenticatedUser(req);
