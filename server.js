@@ -1,5 +1,5 @@
 const express = require('express');
-const { DatabaseSync } = require('node:sqlite');
+const { DatabaseSync } = require('node:sqlite'); 
 const cookieParser = require('cookie-parser');
 const crypto = require('crypto');
 const escapeHtml = require('escape-html');
