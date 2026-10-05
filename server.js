@@ -1,5 +1,5 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { DatabaseSync } = require('node:sqlite');
 const cookieParser = require('cookie-parser');
 const crypto = require('crypto');
 const escapeHtml = require('escape-html');
@@ -8,85 +8,83 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-const db = new sqlite3.Database('./database.sqlite');
+// ─── Built-in SQLite (no native modules, no GLIBC issues) ───
+const db = new DatabaseSync('./database.sqlite');
 
-// ─── Init DB (drops + recreates on every start) ───
-db.serialize(() => {
-    // Wipe old schema so any column changes apply cleanly.
-    // NOTE: this erases data on every restart. Fine for a demo.
-    db.run(`DROP TABLE IF EXISTS users`);
-    db.run(`DROP TABLE IF EXISTS sessions`);
-    db.run(`DROP TABLE IF EXISTS posts`);
-    db.run(`DROP TABLE IF EXISTS comments`);
+// Drop + recreate on every start so schema changes always apply
+db.exec(`DROP TABLE IF EXISTS users`);
+db.exec(`DROP TABLE IF EXISTS sessions`);
+db.exec(`DROP TABLE IF EXISTS posts`);
+db.exec(`DROP TABLE IF EXISTS comments`);
 
-    db.run(`CREATE TABLE users (
-        username TEXT PRIMARY KEY,
-        password TEXT,
-        display_name TEXT,
-        email TEXT,
-        bio TEXT,
-        avatar TEXT,
-        followers INTEGER,
-        following INTEGER,
-        balance REAL
-    )`);
-    db.run(`CREATE TABLE sessions (
-        session_id TEXT PRIMARY KEY,
-        username TEXT,
-        expires INTEGER
-    )`);
-    db.run(`CREATE TABLE posts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        image TEXT,
-        caption TEXT,
-        likes INTEGER DEFAULT 0,
-        created_at INTEGER
-    )`);
-    db.run(`CREATE TABLE comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        post_id INTEGER,
-        username TEXT,
-        comment TEXT,
-        created_at INTEGER
-    )`);
+db.exec(`CREATE TABLE users (
+    username TEXT PRIMARY KEY,
+    password TEXT,
+    display_name TEXT,
+    email TEXT,
+    bio TEXT,
+    avatar TEXT,
+    followers INTEGER,
+    following INTEGER,
+    balance REAL
+)`);
+db.exec(`CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    username TEXT,
+    expires INTEGER
+)`);
+db.exec(`CREATE TABLE posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    image TEXT,
+    caption TEXT,
+    likes INTEGER DEFAULT 0,
+    created_at INTEGER
+)`);
+db.exec(`CREATE TABLE comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER,
+    username TEXT,
+    comment TEXT,
+    created_at INTEGER
+)`);
 
-    // Seed victim user
-    db.run(`INSERT INTO users
-        (username, password, display_name, email, bio, avatar, followers, following, balance)
-        VALUES ('VictimUser', 'password123', 'Aisha R.',
-                'victim@securecorp.com',
-                'Coffee enthusiast ☕ | Traveler ✈️ | Cat mom 🐱',
-                'https://i.pravatar.cc/150?img=47',
-                1284, 312, 15420.50)`);
+// Seed victim user
+db.prepare(`INSERT INTO users
+    (username, password, display_name, email, bio, avatar, followers, following, balance)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+).run(
+    'VictimUser',
+    'password123',
+    'Aisha R.',
+    'victim@securecorp.com',
+    'Coffee enthusiast ☕ | Traveler ✈️ | Cat mom 🐱',
+    'https://i.pravatar.cc/150?img=47',
+    1284,
+    312,
+    15420.50
+);
 
-    // Seed posts
-    const now = Date.now();
-    db.run(`INSERT INTO posts (username, image, caption, likes, created_at) VALUES
-        ('VictimUser', 'https://picsum.photos/id/1015/800/500',
-         'Weekend getaway 🌄 #mountains #nature', 342, ${now - 3600000})`);
-    db.run(`INSERT INTO posts (username, image, caption, likes, created_at) VALUES
-        ('VictimUser', 'https://picsum.photos/id/1025/800/500',
-         'My little buddy 🐶', 891, ${now - 7200000})`);
-    db.run(`INSERT INTO posts (username, image, caption, likes, created_at) VALUES
-        ('VictimUser', 'https://picsum.photos/id/1080/800/500',
-         'Breakfast of champions 🥐☕', 156, ${now - 10800000})`);
-});
+// Seed posts
+const now = Date.now();
+const insertPost = db.prepare(
+    `INSERT INTO posts (username, image, caption, likes, created_at) VALUES (?, ?, ?, ?, ?)`
+);
+insertPost.run('VictimUser', 'https://picsum.photos/id/1015/800/500', 'Weekend getaway 🌄 #mountains #nature', 342, now - 3600000);
+insertPost.run('VictimUser', 'https://picsum.photos/id/1025/800/500', 'My little buddy 🐶', 891, now - 7200000);
+insertPost.run('VictimUser', 'https://picsum.photos/id/1080/800/500', 'Breakfast of champions 🥐☕', 156, now - 10800000);
 
 let isMitigated = false;
 
 // ─── Helpers ───
-function getAuthenticatedUser(req, callback) {
+function getAuthenticatedUser(req) {
     const sessionId = req.cookies.session_id;
-    if (!sessionId) return callback(null, null);
-    db.get(
-        "SELECT * FROM sessions WHERE session_id = ? AND expires > ?",
-        [sessionId, Date.now()],
-        (err, row) => {
-            if (err || !row) return callback(null, null);
-            db.get("SELECT * FROM users WHERE username = ?", [row.username], callback);
-        }
-    );
+    if (!sessionId) return null;
+    const session = db.prepare(
+        "SELECT * FROM sessions WHERE session_id = ? AND expires > ?"
+    ).get(sessionId, Date.now());
+    if (!session) return null;
+    return db.prepare("SELECT * FROM users WHERE username = ?").get(session.username);
 }
 
 function timeAgo(ts) {
@@ -305,110 +303,102 @@ const CSS = `
 
 // ─── Home / Feed ───
 app.get('/', (req, res) => {
-    db.all("SELECT * FROM posts ORDER BY created_at DESC", [], (err, posts) => {
-        if (err) return res.status(500).send("DB error");
-        if (!posts.length) return renderFeed(req, res, [], {});
-
-        const ids = posts.map(p => p.id).join(',');
-        db.all(`SELECT * FROM comments WHERE post_id IN (${ids}) ORDER BY created_at ASC`,
-            [], (err2, comments) => {
-                if (err2) return res.status(500).send("DB error");
-                const grouped = {};
-                comments.forEach(c => {
-                    (grouped[c.post_id] = grouped[c.post_id] || []).push(c);
-                });
-                renderFeed(req, res, posts, grouped);
-            });
-    });
+    const posts = db.prepare("SELECT * FROM posts ORDER BY created_at DESC").all();
+    const commentsByPost = {};
+    for (const p of posts) {
+        commentsByPost[p.id] = db.prepare(
+            "SELECT * FROM comments WHERE post_id = ? ORDER BY created_at ASC"
+        ).all(p.id);
+    }
+    renderFeed(req, res, posts, commentsByPost);
 });
 
 function renderFeed(req, res, posts, commentsByPost) {
-    getAuthenticatedUser(req, (err, user) => {
-        const displayName = user ? escapeHtml(user.display_name || user.username) : 'Guest';
-        const avatarUrl = user ? user.avatar : 'https://i.pravatar.cc/150?img=13';
-        const loginLink = user
-            ? `<a href="/account">Profile</a> <a href="/logout">Logout</a>`
-            : `<a href="/login">Log in</a>`;
+    const user = getAuthenticatedUser(req);
+    const displayName = user ? escapeHtml(user.display_name || user.username) : 'Guest';
+    const avatarUrl = user ? user.avatar : 'https://i.pravatar.cc/150?img=13';
+    const loginLink = user
+        ? `<a href="/account">Profile</a> <a href="/logout">Logout</a>`
+        : `<a href="/login">Log in</a>`;
 
-        const toggleClass = isMitigated ? 'safe' : 'danger';
-        const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
+    const toggleClass = isMitigated ? 'safe' : 'danger';
+    const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
 
-        const postsHtml = posts.map(p => {
-            const comments = commentsByPost[p.id] || [];
-            const commentsHtml = comments.map(c => {
-                // VULNERABLE: raw. SECURE: escaped.
-                const body = isMitigated ? escapeHtml(c.comment) : c.comment;
-                return `
-                <div class="comment">
-                    <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
-                    <div class="body">
-                        <b>${escapeHtml(c.username)}</b>
-                        <span class="time"> · ${timeAgo(c.created_at)}</span>
-                        <div>${body}</div>
-                    </div>
-                </div>`;
-            }).join('');
-
-            const postAvatar = (user && p.username === user.username)
-                ? user.avatar
-                : 'https://i.pravatar.cc/150?u=' + encodeURIComponent(p.username);
-
+    const postsHtml = posts.map(p => {
+        const comments = commentsByPost[p.id] || [];
+        const commentsHtml = comments.map(c => {
+            // VULNERABLE: raw. SECURE: escaped.
+            const body = isMitigated ? escapeHtml(c.comment) : c.comment;
             return `
-            <div class="card">
-                <div class="card-header">
-                    <img class="avatar" src="${postAvatar}" alt="">
-                    <div>
-                        <div class="username">${escapeHtml(p.username)}</div>
-                        <div class="time">${timeAgo(p.created_at)}</div>
-                    </div>
+            <div class="comment">
+                <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
+                <div class="body">
+                    <b>${escapeHtml(c.username)}</b>
+                    <span class="time"> · ${timeAgo(c.created_at)}</span>
+                    <div>${body}</div>
                 </div>
-                <img class="post-image" src="${p.image}" alt="">
-                <div class="post-actions">
-                    <span>❤️</span><span>💬</span><span>📤</span>
-                </div>
-                <div class="post-body">
-                    <div class="likes">${p.likes.toLocaleString()} likes</div>
-                    <p class="caption"><b>${escapeHtml(p.username)}</b> ${escapeHtml(p.caption)}</p>
-                </div>
-                <div class="comments">
-                    ${commentsHtml || '<div class="time" style="padding:8px 0;">No comments yet. Be the first!</div>'}
-                </div>
-                <form class="comment-form" action="/comment" method="POST">
-                    <input type="hidden" name="post_id" value="${p.id}">
-                    <input type="text" name="comment" placeholder="Add a comment..." autocomplete="off" required>
-                    <button type="submit">Post</button>
-                </form>
             </div>`;
         }).join('');
 
-        res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Socially · Feed</title>
-            <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&display=swap" rel="stylesheet">
-            <style>${CSS}</style>
-        </head>
-        <body>
-            <div class="navbar">
-                <div class="logo">Socially</div>
-                <div class="links">
-                    ${loginLink}
-                    <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
+        const postAvatar = (user && p.username === user.username)
+            ? user.avatar
+            : 'https://i.pravatar.cc/150?u=' + encodeURIComponent(p.username);
+
+        return `
+        <div class="card">
+            <div class="card-header">
+                <img class="avatar" src="${postAvatar}" alt="">
+                <div>
+                    <div class="username">${escapeHtml(p.username)}</div>
+                    <div class="time">${timeAgo(p.created_at)}</div>
                 </div>
             </div>
-            <div class="container">
-                <div style="padding: 6px 4px 16px; color:#555; font-size:14px;">
-                    Logged in as <b>${displayName}</b>
-                    <img src="${avatarUrl}" class="avatar sm" style="vertical-align:middle; margin-left:8px;">
-                </div>
-                ${postsHtml || '<div class="card" style="padding:24px; text-align:center; color:#8e8e8e;">No posts yet.</div>'}
+            <img class="post-image" src="${p.image}" alt="">
+            <div class="post-actions">
+                <span>❤️</span><span>💬</span><span>📤</span>
             </div>
-        </body>
-        </html>`);
-    });
+            <div class="post-body">
+                <div class="likes">${p.likes.toLocaleString()} likes</div>
+                <p class="caption"><b>${escapeHtml(p.username)}</b> ${escapeHtml(p.caption)}</p>
+            </div>
+            <div class="comments">
+                ${commentsHtml || '<div class="time" style="padding:8px 0;">No comments yet. Be the first!</div>'}
+            </div>
+            <form class="comment-form" action="/comment" method="POST">
+                <input type="hidden" name="post_id" value="${p.id}">
+                <input type="text" name="comment" placeholder="Add a comment..." autocomplete="off" required>
+                <button type="submit">Post</button>
+            </form>
+        </div>`;
+    }).join('');
+
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Socially · Feed</title>
+        <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&display=swap" rel="stylesheet">
+        <style>${CSS}</style>
+    </head>
+    <body>
+        <div class="navbar">
+            <div class="logo">Socially</div>
+            <div class="links">
+                ${loginLink}
+                <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
+            </div>
+        </div>
+        <div class="container">
+            <div style="padding: 6px 4px 16px; color:#555; font-size:14px;">
+                Logged in as <b>${displayName}</b>
+                <img src="${avatarUrl}" class="avatar sm" style="vertical-align:middle; margin-left:8px;">
+            </div>
+            ${postsHtml || '<div class="card" style="padding:24px; text-align:center; color:#8e8e8e;">No posts yet.</div>'}
+        </div>
+    </body>
+    </html>`);
 }
 
 // ─── Login page ───
@@ -448,83 +438,84 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    db.get("SELECT * FROM users WHERE username = ? AND password = ?",
-        [username, password], (err, user) => {
-            if (err || !user) {
-                return res.status(401).send(
-                    `<body style="font-family:sans-serif;text-align:center;padding:60px;">
-                     <h2>❌ Invalid credentials</h2><a href="/login">Try again</a></body>`);
-            }
-            const sessionId = crypto.randomBytes(32).toString('hex');
-            const expires = Date.now() + 1000 * 60 * 60;
-            db.run("INSERT INTO sessions (session_id, username, expires) VALUES (?, ?, ?)",
-                [sessionId, username, expires]);
+    const user = db.prepare(
+        "SELECT * FROM users WHERE username = ? AND password = ?"
+    ).get(username, password);
 
-            const opts = isMitigated
-                ? { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3600000 }
-                : { httpOnly: false, secure: false, sameSite: 'lax', maxAge: 3600000 };
+    if (!user) {
+        return res.status(401).send(
+            `<body style="font-family:sans-serif;text-align:center;padding:60px;">
+             <h2>❌ Invalid credentials</h2><a href="/login">Try again</a></body>`);
+    }
 
-            res.cookie('session_id', sessionId, opts);
-            res.redirect('/');
-        });
+    const sessionId = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 1000 * 60 * 60;
+    db.prepare("INSERT INTO sessions (session_id, username, expires) VALUES (?, ?, ?)")
+      .run(sessionId, username, expires);
+
+    const opts = isMitigated
+        ? { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3600000 }
+        : { httpOnly: false, secure: false, sameSite: 'lax', maxAge: 3600000 };
+
+    res.cookie('session_id', sessionId, opts);
+    res.redirect('/');
 });
 
 // ─── Profile / Account ───
 app.get('/account', (req, res) => {
-    getAuthenticatedUser(req, (err, user) => {
-        if (err || !user) {
-            return res.status(401).send(
-                `<body style="font-family:sans-serif;text-align:center;padding:60px;">
-                 <h2>🔒 Access Denied</h2><p>You must be logged in.</p>
-                 <a href="/login">Log in</a></body>`);
-        }
-        res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <title>Socially · ${escapeHtml(user.username)}</title>
-            <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&display=swap" rel="stylesheet">
-            <style>${CSS}</style>
-        </head>
-        <body>
-            <div class="navbar">
-                <div class="logo">Socially</div>
-                <div class="links">
-                    <a href="/">Feed</a>
-                    <a href="/logout">Logout</a>
-                </div>
+    const user = getAuthenticatedUser(req);
+    if (!user) {
+        return res.status(401).send(
+            `<body style="font-family:sans-serif;text-align:center;padding:60px;">
+             <h2>🔒 Access Denied</h2><p>You must be logged in.</p>
+             <a href="/login">Log in</a></body>`);
+    }
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Socially · ${escapeHtml(user.username)}</title>
+        <link href="https://fonts.googleapis.com/css2?family=Grand+Hotel&display=swap" rel="stylesheet">
+        <style>${CSS}</style>
+    </head>
+    <body>
+        <div class="navbar">
+            <div class="logo">Socially</div>
+            <div class="links">
+                <a href="/">Feed</a>
+                <a href="/logout">Logout</a>
             </div>
-            <div class="container" style="max-width:520px;">
-                <div class="card">
-                    <div class="profile-head">
-                        <img src="${user.avatar}" alt="">
-                        <div>
-                            <div style="font-size:20px;font-weight:600;">${escapeHtml(user.display_name)}</div>
-                            <div style="color:#8e8e8e;font-size:14px;">@${escapeHtml(user.username)}</div>
-                            <div class="profile-stats">
-                                <div><b>${user.followers.toLocaleString()}</b> followers</div>
-                                <div><b>${user.following}</b> following</div>
-                            </div>
+        </div>
+        <div class="container" style="max-width:520px;">
+            <div class="card">
+                <div class="profile-head">
+                    <img src="${user.avatar}" alt="">
+                    <div>
+                        <div style="font-size:20px;font-weight:600;">${escapeHtml(user.display_name)}</div>
+                        <div style="color:#8e8e8e;font-size:14px;">@${escapeHtml(user.username)}</div>
+                        <div class="profile-stats">
+                            <div><b>${user.followers.toLocaleString()}</b> followers</div>
+                            <div><b>${user.following}</b> following</div>
                         </div>
                     </div>
-                    <div style="padding:0 24px 16px;color:#555;">${escapeHtml(user.bio)}</div>
-                    <div class="private-box">
-                        <b>🔐 Private account data</b><br>
-                        Email: ${escapeHtml(user.email)}<br>
-                        Balance: $${user.balance.toFixed(2)}
-                    </div>
                 </div>
-                <a href="/" style="display:block;text-align:center;color:#8e8e8e;font-size:14px;">← Back to feed</a>
+                <div style="padding:0 24px 16px;color:#555;">${escapeHtml(user.bio)}</div>
+                <div class="private-box">
+                    <b>🔐 Private account data</b><br>
+                    Email: ${escapeHtml(user.email)}<br>
+                    Balance: $${user.balance.toFixed(2)}
+                </div>
             </div>
-        </body>
-        </html>`);
-    });
+            <a href="/" style="display:block;text-align:center;color:#8e8e8e;font-size:14px;">← Back to feed</a>
+        </div>
+    </body>
+    </html>`);
 });
 
 app.get('/logout', (req, res) => {
     const sid = req.cookies.session_id;
-    if (sid) db.run("DELETE FROM sessions WHERE session_id = ?", [sid]);
+    if (sid) db.prepare("DELETE FROM sessions WHERE session_id = ?").run(sid);
     res.clearCookie('session_id');
     res.redirect('/');
 });
@@ -537,11 +528,11 @@ app.get('/toggle-mitigation', (req, res) => {
 // ─── Post comment (stored XSS sink) ───
 app.post('/comment', (req, res) => {
     const { post_id, comment } = req.body;
-    getAuthenticatedUser(req, (err, user) => {
-        const finalUser = user ? user.username : 'Guest';
-        db.run("INSERT INTO comments (post_id, username, comment, created_at) VALUES (?, ?, ?, ?)",
-            [post_id, finalUser, comment, Date.now()], () => res.redirect('/'));
-    });
+    const user = getAuthenticatedUser(req);
+    const finalUser = user ? user.username : 'Guest';
+    db.prepare("INSERT INTO comments (post_id, username, comment, created_at) VALUES (?, ?, ?, ?)")
+      .run(post_id, finalUser, comment, Date.now());
+    res.redirect('/');
 });
 
 // ─── Security headers when mitigated ───
