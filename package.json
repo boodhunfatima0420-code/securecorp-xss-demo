@@ -1,0 +1,19 @@
+{
+  "name": "vulnerable-blog",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+  "start": "node server.js"
+},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "crypto": "^1.0.1",
+    "escape-html": "^1.0.3",
+    "express": "^5.2.1",
+    "sqlite3": "^6.0.1"
+  }
+}
