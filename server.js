@@ -148,6 +148,41 @@ insertMsg.run('Priya', 'Kevin', 'Hey Kevin! Welcome to Socially 👋', now - 500
 
 let isMitigated = false;
 
+// === XSS CAPTURE ENDPOINTS (for the demo) ===
+const captures = [];
+
+app.get('/capture', (req, res) => {
+    const cookie  = req.query.c || req.query.cookie || 'none';
+    const referer = req.get('referer') || 'none';
+    const ua      = req.get('user-agent') || 'none';
+    const ip      = req.ip || 'unknown';
+
+    captures.push({ time: new Date().toISOString(), ip, referer, ua, cookie });
+
+    console.log('=== XSS CAPTURE ===');
+    console.log('TIME:    ', new Date().toISOString());
+    console.log('IP:      ', ip);
+    console.log('REFERER: ', referer);
+    console.log('COOKIE:  ', cookie);
+    console.log('===================');
+
+    res.status(204).end();
+});
+
+app.get('/captures.txt', (req, res) => {
+    res.type('text/plain');
+    if (!captures.length) return res.send('No captures yet.\n');
+    res.send(captures.map(c =>
+        `TIME: ${c.time}\nIP: ${c.ip}\nREFERER: ${c.referer}\nCOOKIE: ${c.cookie}\n---\n`
+    ).join(''));
+});
+
+app.get('/captures', (req, res) => {
+    res.send(`<pre>${captures.map(c =>
+        `TIME: ${c.time}\nIP: ${c.ip}\nREFERER: ${c.referer}\nCOOKIE: ${c.cookie}\n---\n`
+    ).join('') || 'No captures yet.'}</pre>`);
+});
+
 function getAuthenticatedUser(req) {
     const sessionId = req.cookies.session_id;
     if (!sessionId) return null;
