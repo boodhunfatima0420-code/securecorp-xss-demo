@@ -106,7 +106,6 @@ for (const f of friends) {
 const now = Date.now();
 const insertPost = db.prepare(`INSERT INTO posts (username, image, caption, likes, created_at) VALUES (?, ?, ?, ?, ?)`);
 
-// Shehzad's posts — these are what the ATTACKER will see in his feed and target with XSS
 insertPost.run('Shehzad J', 'https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=800&q=80',
     'New toy 🏁 Ford Mustang GT — 5.0L V8, pure American muscle', 542, now - 3600000);
 insertPost.run('Shehzad J', 'https://images.unsplash.com/photo-1531366936337-7c912a4589a7?w=800&q=80',
@@ -114,7 +113,6 @@ insertPost.run('Shehzad J', 'https://images.unsplash.com/photo-1531366936337-7c9
 insertPost.run('Shehzad J', 'https://images.unsplash.com/photo-1520769669658-f07657f5a307?w=800&q=80',
     'Denmark & Faroe Islands — postcard vibes 🇩🇰', 456, now - 10800000);
 
-// Friends' posts — visible to Shehzad when he opens HIS feed (his own posts excluded)
 insertPost.run('Priya', 'https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&q=80',
     'Brunch goals 🥞', 156, now - 1800000);
 insertPost.run('Yannick', 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&q=80',
@@ -128,9 +126,6 @@ insertPost.run('Vikash', 'https://images.unsplash.com/photo-1519681393784-d12026
 insertPost.run('Karim', 'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=800&q=80',
     'Sunday brunch with the family 🍛', 98, now - 13000000);
 
-// Kevin has no posts of his own — a fresh burner account
-// (This also demonstrates that attackers leave no trace on their own feed)
-
 const insertStory = db.prepare(`INSERT INTO stories (username, image, created_at) VALUES (?, ?, ?)`);
 
 insertStory.run('Shehzad J', 'https://images.unsplash.com/photo-1494976388531-d1058494cdd8?w=600&q=80', now - 900000);
@@ -141,7 +136,6 @@ insertStory.run('Vikash',  'https://images.unsplash.com/photo-1519681393784-d120
 insertStory.run('Marie',   'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=600&q=80', now - 6000000);
 insertStory.run('Karim',   'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=600&q=80', now - 7200000);
 
-// Shehzad's private inbox — this is what the attacker reads after takeover
 const insertMsg = db.prepare(`INSERT INTO messages (from_user, to_user, body, created_at) VALUES (?, ?, ?, ?)`);
 
 insertMsg.run('Priya', 'Shehzad J', 'Hey Shehzad! Are you coming to the beach party this weekend? 🏖', now - 7200000);
@@ -150,7 +144,6 @@ insertMsg.run('Yannick', 'Shehzad J', 'Also did you get my email? It is urgent!'
 insertMsg.run('Adele', 'Shehzad J', 'Thanks for the birthday gift! ❤️', now - 1800000);
 insertMsg.run('Karim', 'Shehzad J', 'Meeting tomorrow at 10am still on?', now - 900000);
 
-// Kevin's inbox — boring, no one talks to him
 insertMsg.run('Priya', 'Kevin', 'Hey Kevin! Welcome to Socially 👋', now - 5000000);
 
 let isMitigated = false;
@@ -233,6 +226,9 @@ app.get('/stories.js', (req, res) => {
     res.setHeader('Content-Type', 'application/javascript');
     res.send(STORIES_JS);
 });
+
+// Health check for uptime monitors
+app.get('/health', (req, res) => res.send('ok'));
 
 const CSS = `
   :root {
@@ -481,24 +477,20 @@ const CSS = `
   }
 `;
 
-// Root
 app.get('/', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (user) return res.redirect('/account');
     return res.redirect('/login');
 });
 
-// Feed — shows ONLY other users' posts (not your own)
 app.get('/feed', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
 
-    // Exclude the logged-in user's own posts from the feed
     const posts = db.prepare(
         "SELECT * FROM posts WHERE username != ? ORDER BY created_at DESC"
     ).all(user.username);
 
-    // Stories: still show "Your story" first, then friends (not own circle duplicated)
     const ownStory = db.prepare(
         "SELECT * FROM stories WHERE username = ? ORDER BY created_at DESC LIMIT 1"
     ).get(user.username);
@@ -566,7 +558,6 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
     const postsHtml = posts.map(p => {
         const comments = commentsByPost[p.id] || [];
         const commentsHtml = comments.map(c => {
-            // XSS sink
             const body = isMitigated ? escapeHtml(c.comment) : c.comment;
             return `
             <div class="comment">
@@ -663,7 +654,6 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
     </html>`);
 }
 
-// Login
 app.get('/login', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (user) return res.redirect('/account');
@@ -703,6 +693,7 @@ app.post('/login', (req, res) => {
     ).get(username, password);
 
     if (!user) {
+        console.log(`[LOGIN FAIL] ${username}`);
         return res.status(401).send(
             `<body style="font-family:sans-serif;text-align:center;padding:60px;">
              <h2>❌ Invalid credentials</h2><a href="/login">Try again</a></body>`);
@@ -717,11 +708,12 @@ app.post('/login', (req, res) => {
         ? { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3600000 }
         : { httpOnly: false, secure: false, sameSite: 'lax', maxAge: 3600000 };
 
+    console.log(`[LOGIN OK] user=${username} session=${sessionId.substring(0,12)}... mode=${isMitigated ? 'SECURE' : 'VULNERABLE'}`);
+
     res.cookie('session_id', sessionId, opts);
     res.redirect('/account');
 });
 
-// Account — shows profile info + MY OWN posts
 app.get('/account', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
@@ -733,7 +725,6 @@ app.get('/account', (req, res) => {
         "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND is_read = 0"
     ).get(user.username).c;
 
-    // The user's own posts — shown here, not on the feed
     const myPosts = db.prepare(
         "SELECT * FROM posts WHERE username = ? ORDER BY created_at DESC"
     ).all(user.username);
@@ -832,7 +823,6 @@ app.get('/account', (req, res) => {
     </html>`);
 });
 
-// Messages — shows ONLY messages received (no sent folder)
 app.get('/messages', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
@@ -844,7 +834,6 @@ app.get('/messages', (req, res) => {
         "SELECT * FROM messages WHERE to_user = ? ORDER BY created_at DESC"
     ).all(user.username);
 
-    // Mark as read
     db.prepare("UPDATE messages SET is_read = 1 WHERE to_user = ?").run(user.username);
 
     const inboxHtml = inbox.map(m => `
@@ -931,6 +920,7 @@ app.get('/logout', (req, res) => {
 
 app.get('/toggle-mitigation', (req, res) => {
     isMitigated = !isMitigated;
+    console.log(`[TOGGLE] mitigation=${isMitigated ? 'ON' : 'OFF'}`);
     const back = req.get('referer') || '/feed';
     res.redirect(back);
 });
@@ -950,6 +940,8 @@ app.post('/comment', (req, res) => {
     const { post_id, comment } = req.body;
     const user = getAuthenticatedUser(req);
     const finalUser = user ? user.username : 'Guest';
+    // Log what is being stored so you can verify the payload hit the DB
+    console.log(`[COMMENT] by=${finalUser} post=${post_id} len=${(comment||'').length} preview=${(comment||'').substring(0,80)}`);
     db.prepare("INSERT INTO comments (post_id, username, comment, created_at) VALUES (?, ?, ?, ?)")
       .run(post_id, finalUser, comment, Date.now());
     res.redirect('/feed');
