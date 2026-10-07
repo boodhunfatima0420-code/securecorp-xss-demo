@@ -8,6 +8,8 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Set up the database with Node's built-in SQLite.
+// This version of the code is a fixed build, so we always start clean.
 const db = new DatabaseSync('./database.sqlite');
 
 db.exec(`DROP TABLE IF EXISTS users`);
@@ -63,7 +65,7 @@ db.exec(`CREATE TABLE messages (
     is_read INTEGER DEFAULT 0
 )`);
 
-// Victim
+// The victim account
 db.prepare(`INSERT INTO users (username, password, display_name, email, bio, avatar, followers, following, balance)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 ).run(
@@ -74,7 +76,7 @@ db.prepare(`INSERT INTO users (username, password, display_name, email, bio, ava
     1284, 312, 15420.50
 );
 
-// Attacker
+// The attacker account
 db.prepare(`INSERT INTO users (username, password, display_name, email, bio, avatar, followers, following, balance)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 ).run(
@@ -84,7 +86,7 @@ db.prepare(`INSERT INTO users (username, password, display_name, email, bio, ava
     12, 45, 200
 );
 
-// Friends
+// A handful of friends so the feed looks like a real social network
 const friends = [
     { username: 'Priya',   avatar: 'https://i.pravatar.cc/150?img=45', bio: 'Sun, sand & samosas 🏖' },
     { username: 'Yannick', avatar: 'https://i.pravatar.cc/150?img=15', bio: 'Sega dancer 💃 | Beach bum 🏝' },
@@ -103,6 +105,7 @@ for (const f of friends) {
         100 + Math.floor(Math.random() * 400), 0);
 }
 
+// Seed some posts
 const now = Date.now();
 const insertPost = db.prepare(`INSERT INTO posts (username, image, caption, likes, created_at) VALUES (?, ?, ?, ?, ?)`);
 
@@ -126,6 +129,7 @@ insertPost.run('Vikash', 'https://images.unsplash.com/photo-1519681393784-d12026
 insertPost.run('Karim', 'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=800&q=80',
     'Sunday brunch with the family 🍛', 98, now - 13000000);
 
+// Seed stories
 const insertStory = db.prepare(`INSERT INTO stories (username, image, created_at) VALUES (?, ?, ?)`);
 
 insertStory.run('Shehzad J', 'https://images.unsplash.com/photo-1494976388531-d1058494cdd8?w=600&q=80', now - 900000);
@@ -136,6 +140,7 @@ insertStory.run('Vikash',  'https://images.unsplash.com/photo-1519681393784-d120
 insertStory.run('Marie',   'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=600&q=80', now - 6000000);
 insertStory.run('Karim',   'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=600&q=80', now - 7200000);
 
+// Seed some private messages so the inbox looks real
 const insertMsg = db.prepare(`INSERT INTO messages (from_user, to_user, body, created_at) VALUES (?, ?, ?, ?)`);
 
 insertMsg.run('Priya', 'Shehzad J', 'Hey Shehzad! Are you coming to the beach party this weekend? 🏖', now - 7200000);
@@ -146,43 +151,48 @@ insertMsg.run('Karim', 'Shehzad J', 'Meeting tomorrow at 10am still on?', now - 
 
 insertMsg.run('Priya', 'Kevin', 'Hey Kevin! Welcome to Socially 👋', now - 5000000);
 
-let isMitigated = false;
+// ---------------------------------------------------------------------
+// This is a permanently hardened build.
+// The XSS vulnerability has been removed and there is no toggle to bring
+// it back. Every request is treated as if mitigation is on.
+// ---------------------------------------------------------------------
 
-// === XSS CAPTURE ENDPOINTS (for the demo) ===
-const captures = [];
+// Apply security headers to every response, all the time.
+app.use((req, res, next) => {
+    // Content Security Policy: only allow scripts and styles from our own
+    // origin. This blocks any inline <script> tags even if they somehow
+    // end up in the page.
+    res.setHeader("Content-Security-Policy",
+        "default-src 'self'; " +
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+        "font-src https://fonts.gstatic.com; " +
+        "img-src 'self' data: https://images.unsplash.com https://i.pravatar.cc https://picsum.photos; " +
+        "object-src 'none'; " +
+        "base-uri 'self'; " +
+        "frame-ancestors 'none'; " +
+        "form-action 'self'");
 
-app.get('/capture', (req, res) => {
-    const cookie  = req.query.c || req.query.cookie || 'none';
-    const referer = req.get('referer') || 'none';
-    const ua      = req.get('user-agent') || 'none';
-    const ip      = req.ip || 'unknown';
+    // Stop the browser from guessing content types
+    res.setHeader("X-Content-Type-Options", "nosniff");
 
-    captures.push({ time: new Date().toISOString(), ip, referer, ua, cookie });
+    // Prevent the app from being embedded in another site (clickjacking)
+    res.setHeader("X-Frame-Options", "DENY");
 
-    console.log('=== XSS CAPTURE ===');
-    console.log('TIME:    ', new Date().toISOString());
-    console.log('IP:      ', ip);
-    console.log('REFERER: ', referer);
-    console.log('COOKIE:  ', cookie);
-    console.log('===================');
+    // Tell the browser to only use HTTPS for the next year
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 
-    res.status(204).end();
+    // Don't leak the full URL to external sites
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+
+    // Turn off browser features we don't use
+    res.setHeader("Permissions-Policy",
+        "geolocation=(), microphone=(), camera=(), payment=(), usb=()");
+
+    next();
 });
 
-app.get('/captures.txt', (req, res) => {
-    res.type('text/plain');
-    if (!captures.length) return res.send('No captures yet.\n');
-    res.send(captures.map(c =>
-        `TIME: ${c.time}\nIP: ${c.ip}\nREFERER: ${c.referer}\nCOOKIE: ${c.cookie}\n---\n`
-    ).join(''));
-});
-
-app.get('/captures', (req, res) => {
-    res.send(`<pre>${captures.map(c =>
-        `TIME: ${c.time}\nIP: ${c.ip}\nREFERER: ${c.referer}\nCOOKIE: ${c.cookie}\n---\n`
-    ).join('') || 'No captures yet.'}</pre>`);
-});
-
+// Pull the logged-in user out of the session cookie, if there is one
 function getAuthenticatedUser(req) {
     const sessionId = req.cookies.session_id;
     if (!sessionId) return null;
@@ -192,6 +202,7 @@ function getAuthenticatedUser(req) {
     return db.prepare("SELECT * FROM users WHERE username = ?").get(session.username);
 }
 
+// Small helper to show friendly timestamps
 function timeAgo(ts) {
     const s = Math.floor((Date.now() - ts) / 1000);
     if (s < 60) return s + 's ago';
@@ -200,6 +211,7 @@ function timeAgo(ts) {
     return Math.floor(s / 86400) + 'd ago';
 }
 
+// Theme toggle script, served from its own route so it works under CSP
 const THEME_JS = `
 (function() {
   var KEY = 'socially-theme';
@@ -229,6 +241,7 @@ const THEME_JS = `
 })();
 `;
 
+// Story viewer script, also served from its own route
 const STORIES_JS = `
 (function() {
   document.addEventListener('DOMContentLoaded', function() {
@@ -262,9 +275,10 @@ app.get('/stories.js', (req, res) => {
     res.send(STORIES_JS);
 });
 
-// Health check for uptime monitors
+// Simple health endpoint for uptime checks
 app.get('/health', (req, res) => res.send('ok'));
 
+// All the CSS for the app. Kept in one place so it's easy to reuse.
 const CSS = `
   :root {
     --bg: #fafafa; --card: #ffffff; --text: #262626; --muted: #8e8e8e;
@@ -300,12 +314,6 @@ const CSS = `
   .icon-btn { background: none; border: none; cursor: pointer; font-size: 18px; padding: 6px 10px;
     border-radius: 8px; color: var(--text); transition: background .15s; }
   .icon-btn:hover { background: var(--hover); }
-  .toggle { font-size: 12px; padding: 4px 10px; border-radius: 12px; background: var(--hover);
-    color: var(--muted) !important; text-decoration: none !important; white-space: nowrap; }
-  .toggle.danger { background: #ffe5e5; color: #c33 !important; }
-  .toggle.safe { background: #e5ffe9; color: #1a8a3a !important; }
-  [data-theme="dark"] .toggle.danger { background: #3a1a1a; color: #ff8080 !important; }
-  [data-theme="dark"] .toggle.safe { background: #163a1a; color: #6fdc80 !important; }
   .badge { background: #dc2743; color: #fff; font-size: 10px; border-radius: 8px;
     padding: 1px 6px; margin-left: 4px; font-weight: 700; }
   .container { width: 75%; max-width: 1400px; min-width: 280px; margin: 24px auto; padding: 0 16px; }
@@ -475,7 +483,6 @@ const CSS = `
     .navbar .logo { font-size: 22px; }
     .navbar .links a { margin-left: 8px; font-size: 14px; }
     .icon-btn { padding: 4px 8px; font-size: 16px; }
-    .toggle { font-size: 11px; padding: 3px 8px; }
     .card { border-radius: 6px; margin-bottom: 12px; }
     .card-header { padding: 10px 12px; gap: 10px; }
     .avatar { width: 38px; height: 38px; }
@@ -522,6 +529,7 @@ app.get('/feed', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
 
+    // Show every post except the user's own. Their own posts live on their profile.
     const posts = db.prepare(
         "SELECT * FROM posts WHERE username != ? ORDER BY created_at DESC"
     ).all(user.username);
@@ -534,6 +542,7 @@ app.get('/feed', (req, res) => {
         "SELECT * FROM stories WHERE username != ? ORDER BY created_at DESC"
     ).all(user.username);
 
+    // De-duplicate so each friend appears once in the stories row
     const seen = new Set();
     const uniqueFriendStories = [];
     for (const s of friendStories) {
@@ -542,6 +551,7 @@ app.get('/feed', (req, res) => {
         uniqueFriendStories.push(s);
     }
 
+    // Group comments by post
     const commentsByPost = {};
     for (const p of posts) {
         commentsByPost[p.id] = db.prepare(
@@ -549,6 +559,7 @@ app.get('/feed', (req, res) => {
         ).all(p.id);
     }
 
+    // Unread messages badge
     const unread = db.prepare(
         "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND is_read = 0"
     ).get(user.username).c;
@@ -559,8 +570,6 @@ app.get('/feed', (req, res) => {
 function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStories, unread) {
     const displayName = escapeHtml(user.display_name || user.username);
     const avatarUrl = user.avatar;
-    const toggleClass = isMitigated ? 'safe' : 'danger';
-    const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
 
     const yourStoryImage = ownStory ? ownStory.image : user.avatar;
     const yourStoryHtml = `
@@ -593,14 +602,15 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
     const postsHtml = posts.map(p => {
         const comments = commentsByPost[p.id] || [];
         const commentsHtml = comments.map(c => {
-            const body = isMitigated ? escapeHtml(c.comment) : c.comment;
+            // Every piece of user-submitted content is escaped before it goes
+            // into the page. This is what stops stored XSS dead in its tracks.
             return `
             <div class="comment">
                 <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
                 <div class="body">
                     <b>${escapeHtml(c.username)}</b>
                     <span class="time"> · ${timeAgo(c.created_at)}</span>
-                    <div>${body}</div>
+                    <div>${escapeHtml(c.comment)}</div>
                 </div>
             </div>`;
         }).join('');
@@ -629,7 +639,7 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
             </div>
             <form class="comment-form" action="/comment" method="POST">
                 <input type="hidden" name="post_id" value="${p.id}">
-                <input type="text" name="comment" placeholder="Add a comment..." autocomplete="off" required>
+                <input type="text" name="comment" placeholder="Add a comment..." autocomplete="off" required maxlength="500">
                 <button type="submit">Post</button>
             </form>
         </div>`;
@@ -655,7 +665,6 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
                 <a href="/messages">Messages${unread ? `<span class="badge">${unread}</span>` : ''}</a>
                 <a href="/logout">Logout</a>
                 <button id="theme-toggle" class="icon-btn" type="button">🌙</button>
-                <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
             </div>
         </div>
         <div class="container">
@@ -669,7 +678,7 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
                     <img src="${avatarUrl}" class="avatar sm" alt="">
                     <b>${displayName}</b>
                 </div>
-                <input type="text" name="caption" placeholder="What's on your mind, ${displayName}?" required autocomplete="off">
+                <input type="text" name="caption" placeholder="What's on your mind, ${displayName}?" required autocomplete="off" maxlength="500">
                 <div class="composer-footer">
                     <button type="submit">Post</button>
                 </div>
@@ -734,27 +743,29 @@ app.post('/login', (req, res) => {
              <h2>❌ Invalid credentials</h2><a href="/login">Try again</a></body>`);
     }
 
+    // Generate a random session ID and save it
     const sessionId = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + 1000 * 60 * 60;
     db.prepare("INSERT INTO sessions (session_id, username, expires) VALUES (?, ?, ?)")
       .run(sessionId, username, expires);
 
-    const opts = isMitigated
-        ? { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3600000 }
-        : { httpOnly: false, secure: false, sameSite: 'lax', maxAge: 3600000 };
+    // Cookie is locked down: JavaScript can't read it, it only goes over HTTPS,
+    // and it's never sent on cross-site requests.
+    res.cookie('session_id', sessionId, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'strict',
+        maxAge: 3600000
+    });
 
-    console.log(`[LOGIN OK] user=${username} session=${sessionId.substring(0,12)}... mode=${isMitigated ? 'SECURE' : 'VULNERABLE'}`);
+    console.log(`[LOGIN OK] user=${username} session=${sessionId.substring(0,12)}... (HARDENED)`);
 
-    res.cookie('session_id', sessionId, opts);
     res.redirect('/account');
 });
 
 app.get('/account', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
-
-    const toggleClass = isMitigated ? 'safe' : 'danger';
-    const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
 
     const unread = db.prepare(
         "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND is_read = 0"
@@ -774,14 +785,14 @@ app.get('/account', (req, res) => {
     const myPostsHtml = myPosts.map(p => {
         const comments = commentsByPost[p.id] || [];
         const commentsHtml = comments.map(c => {
-            const body = isMitigated ? escapeHtml(c.comment) : c.comment;
+            // Same escape treatment here — no way for user input to become code.
             return `
             <div class="comment">
                 <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
                 <div class="body">
                     <b>${escapeHtml(c.username)}</b>
                     <span class="time"> · ${timeAgo(c.created_at)}</span>
-                    <div>${body}</div>
+                    <div>${escapeHtml(c.comment)}</div>
                 </div>
             </div>`;
         }).join('');
@@ -825,7 +836,6 @@ app.get('/account', (req, res) => {
                 <a href="/messages">Messages${unread ? `<span class="badge">${unread}</span>` : ''}</a>
                 <a href="/logout">Logout</a>
                 <button id="theme-toggle" class="icon-btn" type="button">🌙</button>
-                <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
             </div>
         </div>
         <div class="container">
@@ -862,13 +872,11 @@ app.get('/messages', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
 
-    const toggleClass = isMitigated ? 'safe' : 'danger';
-    const toggleLabel = isMitigated ? '🛡 SECURE' : '⚠ VULNERABLE';
-
     const inbox = db.prepare(
         "SELECT * FROM messages WHERE to_user = ? ORDER BY created_at DESC"
     ).all(user.username);
 
+    // Mark everything as read once the inbox is opened
     db.prepare("UPDATE messages SET is_read = 1 WHERE to_user = ?").run(user.username);
 
     const inboxHtml = inbox.map(m => `
@@ -882,6 +890,7 @@ app.get('/messages', (req, res) => {
         </div>
     `).join('');
 
+    // Build the recipient dropdown
     const allUsers = db.prepare("SELECT username FROM users WHERE username != ?").all(user.username);
     const optionsHtml = allUsers.map(u =>
         `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`
@@ -906,7 +915,6 @@ app.get('/messages', (req, res) => {
                 <a href="/account">Profile</a>
                 <a href="/logout">Logout</a>
                 <button id="theme-toggle" class="icon-btn" type="button">🌙</button>
-                <a href="/toggle-mitigation" class="toggle ${toggleClass}">${toggleLabel}</a>
             </div>
         </div>
         <div class="container">
@@ -924,7 +932,7 @@ app.get('/messages', (req, res) => {
                         <option value="">Choose recipient…</option>
                         ${optionsHtml}
                     </select>
-                    <input type="text" name="body" placeholder="Write a message..." required autocomplete="off">
+                    <input type="text" name="body" placeholder="Write a message..." required autocomplete="off" maxlength="500">
                     <button type="submit">Send</button>
                 </form>
             </div>
@@ -940,8 +948,11 @@ app.post('/messages/send', (req, res) => {
     const { to_user, body } = req.body;
     if (!to_user || !body) return res.redirect('/messages');
 
+    // Cap length so nobody can dump a novel into the database
+    const safeBody = body.slice(0, 500);
+
     db.prepare("INSERT INTO messages (from_user, to_user, body, created_at, is_read) VALUES (?, ?, ?, ?, 0)")
-      .run(user.username, to_user, body, Date.now());
+      .run(user.username, to_user, safeBody, Date.now());
 
     res.redirect('/messages');
 });
@@ -953,17 +964,10 @@ app.get('/logout', (req, res) => {
     res.redirect('/login');
 });
 
-app.get('/toggle-mitigation', (req, res) => {
-    isMitigated = !isMitigated;
-    console.log(`[TOGGLE] mitigation=${isMitigated ? 'ON' : 'OFF'}`);
-    const back = req.get('referer') || '/feed';
-    res.redirect(back);
-});
-
 app.post('/post', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
-    const caption = (req.body.caption || '').trim();
+    const caption = (req.body.caption || '').trim().slice(0, 500);
     if (!caption) return res.redirect('/feed');
     const image = 'https://picsum.photos/800/500?random=' + Date.now();
     db.prepare("INSERT INTO posts (username, image, caption, likes, created_at) VALUES (?, ?, ?, ?, ?)")
@@ -975,22 +979,25 @@ app.post('/comment', (req, res) => {
     const { post_id, comment } = req.body;
     const user = getAuthenticatedUser(req);
     const finalUser = user ? user.username : 'Guest';
-    // Log what is being stored so you can verify the payload hit the DB
-    console.log(`[COMMENT] by=${finalUser} post=${post_id} len=${(comment||'').length} preview=${(comment||'').substring(0,80)}`);
+
+    // Trim to 500 characters before storing. Even with output encoding in
+    // place, this is one more layer that limits the damage a payload can do.
+    const safeComment = (comment || '').slice(0, 500);
+
+    console.log(`[COMMENT] by=${finalUser} post=${post_id} len=${safeComment.length} preview=${safeComment.substring(0,80)}`);
+
     db.prepare("INSERT INTO comments (post_id, username, comment, created_at) VALUES (?, ?, ?, ?)")
-      .run(post_id, finalUser, comment, Date.now());
+      .run(post_id, finalUser, safeComment, Date.now());
     res.redirect('/feed');
 });
 
-app.use((req, res, next) => {
-    if (isMitigated) {
-        res.setHeader("Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://images.unsplash.com https://i.pravatar.cc https://picsum.photos; object-src 'none'");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("X-Frame-Options", "DENY");
-    }
-    next();
+// This route used to toggle the mitigation on and off.
+// In the hardened build there's nothing to toggle, so we just redirect
+// and log a warning if anyone tries to hit it.
+app.get('/toggle-mitigation', (req, res) => {
+    console.log('[BLOCKED] Attempt to toggle mitigation — this build is permanently hardened.');
+    res.redirect('/feed');
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT} — HARDENED BUILD (no vulnerable mode)`));
