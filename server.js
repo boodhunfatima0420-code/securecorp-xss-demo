@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
 const cookieParser = require('cookie-parser');
@@ -9,7 +10,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Set up the database with Node's built-in SQLite.
-// This version of the code is a fixed build, so we always start clean.
+// This build is permanently hardened, so we always start from a clean slate.
 const db = new DatabaseSync('./database.sqlite');
 
 db.exec(`DROP TABLE IF EXISTS users`);
@@ -140,7 +141,7 @@ insertStory.run('Vikash',  'https://images.unsplash.com/photo-1519681393784-d120
 insertStory.run('Marie',   'https://images.unsplash.com/photo-1542751371-adc38448a05e?w=600&q=80', now - 6000000);
 insertStory.run('Karim',   'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=600&q=80', now - 7200000);
 
-// Seed some private messages so the inbox looks real
+// Seed private messages so the inbox looks real
 const insertMsg = db.prepare(`INSERT INTO messages (from_user, to_user, body, created_at) VALUES (?, ?, ?, ?)`);
 
 insertMsg.run('Priya', 'Shehzad J', 'Hey Shehzad! Are you coming to the beach party this weekend? 🏖', now - 7200000);
@@ -151,17 +152,65 @@ insertMsg.run('Karim', 'Shehzad J', 'Meeting tomorrow at 10am still on?', now - 
 
 insertMsg.run('Priya', 'Kevin', 'Hey Kevin! Welcome to Socially 👋', now - 5000000);
 
-// ---------------------------------------------------------------------
-// This is a permanently hardened build.
-// The XSS vulnerability has been removed and there is no toggle to bring
-// it back. Every request is treated as if mitigation is on.
-// ---------------------------------------------------------------------
+// ============================================================
+// MITIGATION 1 — INPUT FILTER
+// Rejects anything that looks like HTML, a script, or an event handler
+// before it ever reaches the database. Stored XSS becomes impossible.
+// ============================================================
+const DANGEROUS_PATTERNS = [
+    /<script[\s>\/]/i,
+    /<\/script/i,
+    /<iframe[\s>\/]/i,
+    /<object[\s>\/]/i,
+    /<embed[\s>\/]/i,
+    /<svg[\s>\/]/i,
+    /<img[\s>\/]/i,
+    /<style[\s>\/]/i,
+    /<link[\s>\/]/i,
+    /<meta[\s>\/]/i,
+    /<base[\s>\/]/i,
+    /<form[\s>\/]/i,
+    /<input[\s>\/]/i,
+    /on[a-z]+\s*=/i,
+    /javascript\s*:/i,
+    /vbscript\s*:/i,
+    /data\s*:\s*text\/html/i,
+    /<[a-z][a-z0-9]*\s+[^>]*>/i,
+    /<[a-z][a-z0-9]*>/i
+];
 
-// Apply security headers to every response, all the time.
+function containsMaliciousContent(text) {
+    if (!text || typeof text !== 'string') return false;
+    for (const pattern of DANGEROUS_PATTERNS) {
+        if (pattern.test(text)) return true;
+    }
+    return false;
+}
+
+// Track recent blocks so the victim sees a real-time security notice.
+const recentBlocks = [];
+
+function recordBlock(username, postId, preview) {
+    recentBlocks.push({
+        time: Date.now(),
+        user: username,
+        post: postId,
+        preview: preview.substring(0, 100)
+    });
+    if (recentBlocks.length > 20) recentBlocks.shift();
+}
+
+function getRecentBlockCount(windowMs = 5 * 60 * 1000) {
+    const cutoff = Date.now() - windowMs;
+    return recentBlocks.filter(b => b.time > cutoff).length;
+}
+
+// ============================================================
+// MITIGATION 4 — SECURITY HEADERS (always applied)
+// CSP blocks inline scripts. HSTS forces HTTPS. X-Frame-Options
+// stops clickjacking. Referrer-Policy limits leakage.
+// ============================================================
 app.use((req, res, next) => {
-    // Content Security Policy: only allow scripts and styles from our own
-    // origin. This blocks any inline <script> tags even if they somehow
-    // end up in the page.
     res.setHeader("Content-Security-Policy",
         "default-src 'self'; " +
         "script-src 'self'; " +
@@ -173,26 +222,16 @@ app.use((req, res, next) => {
         "frame-ancestors 'none'; " +
         "form-action 'self'");
 
-    // Stop the browser from guessing content types
     res.setHeader("X-Content-Type-Options", "nosniff");
-
-    // Prevent the app from being embedded in another site (clickjacking)
     res.setHeader("X-Frame-Options", "DENY");
-
-    // Tell the browser to only use HTTPS for the next year
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-
-    // Don't leak the full URL to external sites
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-
-    // Turn off browser features we don't use
     res.setHeader("Permissions-Policy",
         "geolocation=(), microphone=(), camera=(), payment=(), usb=()");
 
     next();
 });
 
-// Pull the logged-in user out of the session cookie, if there is one
 function getAuthenticatedUser(req) {
     const sessionId = req.cookies.session_id;
     if (!sessionId) return null;
@@ -202,7 +241,6 @@ function getAuthenticatedUser(req) {
     return db.prepare("SELECT * FROM users WHERE username = ?").get(session.username);
 }
 
-// Small helper to show friendly timestamps
 function timeAgo(ts) {
     const s = Math.floor((Date.now() - ts) / 1000);
     if (s < 60) return s + 's ago';
@@ -211,7 +249,6 @@ function timeAgo(ts) {
     return Math.floor(s / 86400) + 'd ago';
 }
 
-// Theme toggle script, served from its own route so it works under CSP
 const THEME_JS = `
 (function() {
   var KEY = 'socially-theme';
@@ -241,7 +278,6 @@ const THEME_JS = `
 })();
 `;
 
-// Story viewer script, also served from its own route
 const STORIES_JS = `
 (function() {
   document.addEventListener('DOMContentLoaded', function() {
@@ -275,10 +311,8 @@ app.get('/stories.js', (req, res) => {
     res.send(STORIES_JS);
 });
 
-// Simple health endpoint for uptime checks
 app.get('/health', (req, res) => res.send('ok'));
 
-// All the CSS for the app. Kept in one place so it's easy to reuse.
 const CSS = `
   :root {
     --bg: #fafafa; --card: #ffffff; --text: #262626; --muted: #8e8e8e;
@@ -316,6 +350,27 @@ const CSS = `
   .icon-btn:hover { background: var(--hover); }
   .badge { background: #dc2743; color: #fff; font-size: 10px; border-radius: 8px;
     padding: 1px 6px; margin-left: 4px; font-weight: 700; }
+
+  /* Security banners */
+  .security-alert {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; border-radius: 8px; margin-bottom: 20px;
+    font-size: 14px; line-height: 1.4;
+  }
+  .security-alert.danger {
+    background: #fdecea; border: 1px solid #f5c6cb; color: #721c24;
+  }
+  .security-alert.warning {
+    background: #fff8e1; border: 1px solid #ffe082; color: #7a5d00;
+  }
+  .security-alert .icon { font-size: 22px; flex-shrink: 0; }
+  [data-theme="dark"] .security-alert.danger {
+    background: #3a1c1c; border-color: #6b2a2a; color: #ff9b9b;
+  }
+  [data-theme="dark"] .security-alert.warning {
+    background: #3a331a; border-color: #6b5e2a; color: #ffd966;
+  }
+
   .container { width: 75%; max-width: 1400px; min-width: 280px; margin: 24px auto; padding: 0 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
     margin-bottom: 20px; overflow: hidden; transition: background .2s, border-color .2s; }
@@ -516,8 +571,36 @@ const CSS = `
     .dm-form select, .dm-form input[type=text], .dm-form button { width: 100%; min-width: 0; }
     .story-modal-inner { max-width: 100%; }
     .story-close { top: -36px; font-size: 24px; }
+    .security-alert { padding: 12px 14px; font-size: 13px; }
   }
 `;
+
+function attackerWarningBanner() {
+    return `
+        <div class="security-alert danger">
+            <span class="icon">🚫</span>
+            <div>
+                <strong>Comment blocked by security filter.</strong><br>
+                Your input contained scripts, HTML tags, or unsafe code.
+                Scripts are not acceptable as comment input on this platform.
+                Please write plain text only.
+            </div>
+        </div>
+    `;
+}
+
+function victimNoticeBanner(count) {
+    return `
+        <div class="security-alert warning">
+            <span class="icon">🛡</span>
+            <div>
+                <strong>Security notice.</strong>
+                Our filter recently blocked ${count} comment${count > 1 ? 's' : ''} that contained unsafe content.
+                Nothing was saved. Your account and sessions remain safe.
+            </div>
+        </div>
+    `;
+}
 
 app.get('/', (req, res) => {
     const user = getAuthenticatedUser(req);
@@ -529,7 +612,6 @@ app.get('/feed', (req, res) => {
     const user = getAuthenticatedUser(req);
     if (!user) return res.redirect('/login');
 
-    // Show every post except the user's own. Their own posts live on their profile.
     const posts = db.prepare(
         "SELECT * FROM posts WHERE username != ? ORDER BY created_at DESC"
     ).all(user.username);
@@ -542,7 +624,6 @@ app.get('/feed', (req, res) => {
         "SELECT * FROM stories WHERE username != ? ORDER BY created_at DESC"
     ).all(user.username);
 
-    // De-duplicate so each friend appears once in the stories row
     const seen = new Set();
     const uniqueFriendStories = [];
     for (const s of friendStories) {
@@ -551,7 +632,6 @@ app.get('/feed', (req, res) => {
         uniqueFriendStories.push(s);
     }
 
-    // Group comments by post
     const commentsByPost = {};
     for (const p of posts) {
         commentsByPost[p.id] = db.prepare(
@@ -559,15 +639,17 @@ app.get('/feed', (req, res) => {
         ).all(p.id);
     }
 
-    // Unread messages badge
     const unread = db.prepare(
         "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND is_read = 0"
     ).get(user.username).c;
 
-    renderFeed(req, res, user, posts, commentsByPost, ownStory, uniqueFriendStories, unread);
+    const blockedCount = getRecentBlockCount();
+    const attackerBlocked = req.query.blocked === '1';
+
+    renderFeed(req, res, user, posts, commentsByPost, ownStory, uniqueFriendStories, unread, blockedCount, attackerBlocked);
 });
 
-function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStories, unread) {
+function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStories, unread, blockedCount, attackerBlocked) {
     const displayName = escapeHtml(user.display_name || user.username);
     const avatarUrl = user.avatar;
 
@@ -602,8 +684,8 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
     const postsHtml = posts.map(p => {
         const comments = commentsByPost[p.id] || [];
         const commentsHtml = comments.map(c => {
-            // Every piece of user-submitted content is escaped before it goes
-            // into the page. This is what stops stored XSS dead in its tracks.
+            // MITIGATION 2 — OUTPUT ENCODING
+            // Every piece of user content is escaped before going into the page.
             return `
             <div class="comment">
                 <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
@@ -645,6 +727,9 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
         </div>`;
     }).join('');
 
+    const attackerBanner = attackerBlocked ? attackerWarningBanner() : '';
+    const victimBanner = (!attackerBlocked && blockedCount > 0) ? victimNoticeBanner(blockedCount) : '';
+
     res.send(`
     <!DOCTYPE html>
     <html>
@@ -668,6 +753,9 @@ function renderFeed(req, res, user, posts, commentsByPost, ownStory, friendStori
             </div>
         </div>
         <div class="container">
+            ${attackerBanner}
+            ${victimBanner}
+
             <div class="stories">
                 ${yourStoryHtml}
                 ${friendStoriesHtml || ''}
@@ -737,28 +825,28 @@ app.post('/login', (req, res) => {
     ).get(username, password);
 
     if (!user) {
-        console.log(`[LOGIN FAIL] ${username}`);
         return res.status(401).send(
             `<body style="font-family:sans-serif;text-align:center;padding:60px;">
              <h2>❌ Invalid credentials</h2><a href="/login">Try again</a></body>`);
     }
 
-    // Generate a random session ID and save it
     const sessionId = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + 1000 * 60 * 60;
     db.prepare("INSERT INTO sessions (session_id, username, expires) VALUES (?, ?, ?)")
       .run(sessionId, username, expires);
 
-    // Cookie is locked down: JavaScript can't read it, it only goes over HTTPS,
-    // and it's never sent on cross-site requests.
+    // ============================================================
+    // MITIGATION 3 — HARDENED SESSION COOKIE
+    // httpOnly: JavaScript cannot read the cookie
+    // secure:   cookie only sent over HTTPS
+    // sameSite: 'strict' — cookie never sent on cross-site requests
+    // ============================================================
     res.cookie('session_id', sessionId, {
         httpOnly: true,
         secure: true,
         sameSite: 'strict',
         maxAge: 3600000
     });
-
-    console.log(`[LOGIN OK] user=${username} session=${sessionId.substring(0,12)}... (HARDENED)`);
 
     res.redirect('/account');
 });
@@ -785,7 +873,6 @@ app.get('/account', (req, res) => {
     const myPostsHtml = myPosts.map(p => {
         const comments = commentsByPost[p.id] || [];
         const commentsHtml = comments.map(c => {
-            // Same escape treatment here — no way for user input to become code.
             return `
             <div class="comment">
                 <img class="avatar sm" src="https://i.pravatar.cc/60?u=${encodeURIComponent(c.username)}" alt="">
@@ -817,6 +904,9 @@ app.get('/account', (req, res) => {
         </div>`;
     }).join('');
 
+    const blockedCount = getRecentBlockCount();
+    const victimBanner = blockedCount > 0 ? victimNoticeBanner(blockedCount) : '';
+
     res.send(`
     <!DOCTYPE html>
     <html>
@@ -839,6 +929,8 @@ app.get('/account', (req, res) => {
             </div>
         </div>
         <div class="container">
+            ${victimBanner}
+
             <div class="card">
                 <div class="profile-head">
                     <img src="${user.avatar}" alt="">
@@ -876,7 +968,6 @@ app.get('/messages', (req, res) => {
         "SELECT * FROM messages WHERE to_user = ? ORDER BY created_at DESC"
     ).all(user.username);
 
-    // Mark everything as read once the inbox is opened
     db.prepare("UPDATE messages SET is_read = 1 WHERE to_user = ?").run(user.username);
 
     const inboxHtml = inbox.map(m => `
@@ -890,11 +981,20 @@ app.get('/messages', (req, res) => {
         </div>
     `).join('');
 
-    // Build the recipient dropdown
     const allUsers = db.prepare("SELECT username FROM users WHERE username != ?").all(user.username);
     const optionsHtml = allUsers.map(u =>
         `<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`
     ).join('');
+
+    const blockedBanner = req.query.blocked === '1' ? `
+        <div class="security-alert danger">
+            <span class="icon">🚫</span>
+            <div>
+                <strong>Message blocked by security filter.</strong><br>
+                Scripts and HTML tags are not acceptable input on this platform.
+            </div>
+        </div>
+    ` : '';
 
     res.send(`
     <!DOCTYPE html>
@@ -918,6 +1018,8 @@ app.get('/messages', (req, res) => {
             </div>
         </div>
         <div class="container">
+            ${blockedBanner}
+
             <div class="card">
                 <div class="section-title">📥 Inbox — ${escapeHtml(user.username)}</div>
                 <div class="dm-list">
@@ -948,8 +1050,13 @@ app.post('/messages/send', (req, res) => {
     const { to_user, body } = req.body;
     if (!to_user || !body) return res.redirect('/messages');
 
-    // Cap length so nobody can dump a novel into the database
     const safeBody = body.slice(0, 500);
+
+    if (containsMaliciousContent(safeBody)) {
+        console.log(`[BLOCKED] Malicious message from ${user.username}`);
+        recordBlock(user.username, null, safeBody);
+        return res.redirect('/messages?blocked=1');
+    }
 
     db.prepare("INSERT INTO messages (from_user, to_user, body, created_at, is_read) VALUES (?, ?, ?, ?, 0)")
       .run(user.username, to_user, safeBody, Date.now());
@@ -969,35 +1076,48 @@ app.post('/post', (req, res) => {
     if (!user) return res.redirect('/login');
     const caption = (req.body.caption || '').trim().slice(0, 500);
     if (!caption) return res.redirect('/feed');
+
+    if (containsMaliciousContent(caption)) {
+        console.log(`[BLOCKED] Malicious caption from ${user.username}`);
+        recordBlock(user.username, null, caption);
+        return res.redirect('/feed?blocked=1');
+    }
+
     const image = 'https://picsum.photos/800/500?random=' + Date.now();
     db.prepare("INSERT INTO posts (username, image, caption, likes, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(user.username, image, caption, 0, Date.now());
     res.redirect('/feed');
 });
 
+// ============================================================
+// MAIN XSS ENTRY POINT — now fully protected
+// The payload is rejected before it ever reaches the database.
+// ============================================================
 app.post('/comment', (req, res) => {
     const { post_id, comment } = req.body;
     const user = getAuthenticatedUser(req);
     const finalUser = user ? user.username : 'Guest';
 
-    // Trim to 500 characters before storing. Even with output encoding in
-    // place, this is one more layer that limits the damage a payload can do.
     const safeComment = (comment || '').slice(0, 500);
 
-    console.log(`[COMMENT] by=${finalUser} post=${post_id} len=${safeComment.length} preview=${safeComment.substring(0,80)}`);
+    if (containsMaliciousContent(safeComment)) {
+        console.log(`[BLOCKED] Malicious comment from ${finalUser} on post ${post_id}`);
+        console.log(`          Preview: ${safeComment.substring(0, 80)}`);
+        recordBlock(finalUser, post_id, safeComment);
+        return res.redirect('/feed?blocked=1');
+    }
 
+    console.log(`[COMMENT] by=${finalUser} post=${post_id} len=${safeComment.length}`);
     db.prepare("INSERT INTO comments (post_id, username, comment, created_at) VALUES (?, ?, ?, ?)")
       .run(post_id, finalUser, safeComment, Date.now());
     res.redirect('/feed');
 });
 
-// This route used to toggle the mitigation on and off.
-// In the hardened build there's nothing to toggle, so we just redirect
-// and log a warning if anyone tries to hit it.
+// The old toggle route is disabled. The app is permanently hardened.
 app.get('/toggle-mitigation', (req, res) => {
-    console.log('[BLOCKED] Attempt to toggle mitigation — this build is permanently hardened.');
+    console.log('[BLOCKED] Attempt to toggle mitigation — permanently hardened.');
     res.redirect('/feed');
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT} — HARDENED BUILD (no vulnerable mode)`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT} — HARDENED BUILD`));
